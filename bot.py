@@ -11,6 +11,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 from dotenv import load_dotenv
 
+from agregator import aggregate_salaries
+
 logging.basicConfig(level=logging.INFO)
 
 load_dotenv()
