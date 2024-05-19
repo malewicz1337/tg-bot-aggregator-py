@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -17,26 +17,50 @@ async def aggregate_salaries(dt_from, dt_upto, group_type):
 
     if group_type == "hour":
         group_format = "%Y-%m-%dT%H:00:00"
+        boundaries = [
+            dt_from + timedelta(hours=i)
+            for i in range(
+                (dt_upto - dt_from).days * 24 + (dt_upto - dt_from).seconds // 3600 + 2
+            )
+        ]
     elif group_type == "day":
         group_format = "%Y-%m-%dT00:00:00"
+        boundaries = [
+            dt_from + timedelta(days=i) for i in range((dt_upto - dt_from).days + 2)
+        ]
     elif group_type == "month":
         group_format = "%Y-%m-01T00:00:00"
+        boundaries = []
+        current = dt_from
+        while current <= dt_upto:
+            boundaries.append(current)
+            current += timedelta(days=30)
+        boundaries.append(dt_upto + timedelta(days=1))
     else:
         raise ValueError("Invalid group_type")
+
+    bucket_boundaries = [boundary.isoformat() for boundary in boundaries]
 
     pipeline = [
         {"$match": {"dt": {"$gte": dt_from, "$lte": dt_upto}}},
         {
-            "$group": {
-                "_id": {"$dateToString": {"format": group_format, "date": "$dt"}},
-                "total": {"$sum": "$value"},
+            "$bucket": {
+                "groupBy": "$dt",
+                "boundaries": boundaries,
+                "default": "Other",
+                "output": {"total": {"$sum": "$value"}},
             }
         },
         {"$sort": {"_id": 1}},
     ]
     results = await collection.aggregate(pipeline).to_list(length=None)
 
-    dataset = [r["total"] for r in results]
-    labels = [r["_id"] for r in results]
+    dataset = [0] * (len(bucket_boundaries) - 1)
+    labels = [boundary.strftime(group_format) for boundary in boundaries[:-1]]
+
+    for result in results:
+        if result["_id"] != "Other":
+            index = bucket_boundaries.index(result["_id"].isoformat())
+            dataset[index] = result["total"]
 
     return {"dataset": dataset, "labels": labels}
