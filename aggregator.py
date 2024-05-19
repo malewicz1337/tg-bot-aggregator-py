@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+from dateutil.relativedelta import relativedelta
 from motor.motor_asyncio import AsyncIOMotorClient
 
 MONGO_URI = "mongodb://127.0.0.1:27017"
@@ -11,56 +12,55 @@ db = client[DB_NAME]
 collection = db[COLLECTION_NAME]
 
 
+async def generate_intervals(dt_from, dt_upto, group_type):
+    if group_type == "hour":
+        step = timedelta(hours=1)
+        format_str = "%Y-%m-%dT%H:00:00"
+    elif group_type == "day":
+        step = timedelta(days=1)
+        format_str = "%Y-%m-%dT00:00:00"
+    elif group_type == "month":
+        step = relativedelta(months=1)
+        format_str = "%Y-%m-01T00:00:00"
+    else:
+        raise ValueError("Invalid group_type")
+
+    current = dt_from
+    intervals = []
+    while current <= dt_upto:
+        intervals.append(current.strftime(format_str))
+        current += step
+
+    return intervals
+
+
 async def aggregate_salaries(dt_from, dt_upto, group_type):
     dt_from = datetime.fromisoformat(dt_from)
     dt_upto = datetime.fromisoformat(dt_upto)
 
     if group_type == "hour":
         group_format = "%Y-%m-%dT%H:00:00"
-        boundaries = [
-            dt_from + timedelta(hours=i)
-            for i in range(
-                (dt_upto - dt_from).days * 24 + (dt_upto - dt_from).seconds // 3600 + 2
-            )
-        ]
     elif group_type == "day":
         group_format = "%Y-%m-%dT00:00:00"
-        boundaries = [
-            dt_from + timedelta(days=i) for i in range((dt_upto - dt_from).days + 2)
-        ]
     elif group_type == "month":
         group_format = "%Y-%m-01T00:00:00"
-        boundaries = []
-        current = dt_from
-        while current <= dt_upto:
-            boundaries.append(current)
-            current += timedelta(days=30)
-        boundaries.append(dt_upto + timedelta(days=1))
     else:
         raise ValueError("Invalid group_type")
-
-    bucket_boundaries = [boundary.isoformat() for boundary in boundaries]
 
     pipeline = [
         {"$match": {"dt": {"$gte": dt_from, "$lte": dt_upto}}},
         {
-            "$bucket": {
-                "groupBy": "$dt",
-                "boundaries": boundaries,
-                "default": "Other",
-                "output": {"total": {"$sum": "$value"}},
+            "$group": {
+                "_id": {"$dateToString": {"format": group_format, "date": "$dt"}},
+                "total": {"$sum": "$value"},
             }
         },
         {"$sort": {"_id": 1}},
     ]
     results = await collection.aggregate(pipeline).to_list(length=None)
 
-    dataset = [0] * (len(bucket_boundaries) - 1)
-    labels = [boundary.strftime(group_format) for boundary in boundaries[:-1]]
+    dataset = {r["_id"]: r["total"] for r in results}
+    labels = await generate_intervals(dt_from, dt_upto, group_type)
+    full_dataset = [dataset.get(label, 0) for label in labels]
 
-    for result in results:
-        if result["_id"] != "Other":
-            index = bucket_boundaries.index(result["_id"].isoformat())
-            dataset[index] = result["total"]
-
-    return {"dataset": dataset, "labels": labels}
+    return {"dataset": full_dataset, "labels": labels}
